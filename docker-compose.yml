@@ -1,0 +1,238 @@
+services:
+
+  # ---------------------------------------------------------------------
+  # Redpanda
+  # ---------------------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+    ports:
+      - "19092:19092"   # Kafka API (extern)
+      - "18081:18081"   # Schema Registry
+      - "18082:18082"   # Pandaproxy (REST-Produce/Consume)
+      - "9644:9644"     # Admin API / Prometheus-Metrics
+    networks:
+      - pipeline-net
+    volumes:
+      - redpanda-volume:/var/lib/redpanda/data
+    healthcheck:
+      test: [ "CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: on-failure
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    container_name: redpanda-console
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
+    ports:
+      - "8080:8080"
+    networks:
+      - pipeline-net
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: on-failure
+
+  # ---------------------------------------------------------------------
+  # Prometheus
+  # ---------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - pipeline-net
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-volume:/prometheus
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: on-failure
+
+  # ---------------------------------------------------------------------
+  # TimescaleDB & pgAdmin
+  # ---------------------------------------------------------------------
+  timescaledb:
+    image: timescale/timescaledb:2.16.1-pg16
+    container_name: timescaledb
+    environment:
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline
+      POSTGRES_DB: pipeline_db
+    ports:
+      - "5432:5432"
+    networks:
+      - pipeline-net
+    volumes:
+      - timescale-volume:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "pipeline", "-d", "pipeline_db" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: on-failure
+
+  pgadmin:
+    image: dpage/pgadmin4:8.12
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    networks:
+      - pipeline-net
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: on-failure
+
+  # ---------------------------------------------------------------------
+  # Grafana
+  # ---------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    networks:
+      - pipeline-net
+    volumes:
+      - grafana-volume:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+    restart: on-failure
+
+  # ---------------------------------------------------------------------
+  # Spark Master, Worker & Submit
+  # ---------------------------------------------------------------------
+  spark-master:
+    image: spark:3.5.8
+    container_name: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    ports:
+      - "8081:8080"   # Spark Master UI
+      - "7077:7077"   # Spark Master RPC
+    networks:
+      - pipeline-net
+    restart: on-failure
+
+  spark-worker:
+    image: spark:3.5.8
+    container_name: spark-worker
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2g
+    networks:
+      - pipeline-net
+    depends_on:
+      - spark-master
+    restart: on-failure
+
+  spark-submit:
+    image: spark:3.5.8
+    container_name: spark-submit
+    user: root
+    environment:
+      - HOME=/tmp
+      - SPARK_USER=spark
+      - SPARK_SUBMIT_OPTS=-Duser.home=/tmp -Divy.default.ivy.user.dir=/tmp/.ivy2
+    volumes:
+      - ./jobs:/opt/spark-apps
+    networks:
+      - pipeline-net
+    depends_on:
+      - spark-worker
+      - timescaledb
+    command: >
+      /opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      --conf "spark.driver.extraJavaOptions=-Duser.home=/tmp -Divy.default.ivy.user.dir=/tmp/.ivy2"
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.postgresql:postgresql:42.7.2
+      /opt/spark-apps/streaming_job.py
+    restart: on-failure
+
+  # ---------------------------------------------------------------------
+  # Producer: Open-Meteo Weather
+  # ---------------------------------------------------------------------
+  weather-producer:
+    build: ./producers/weather
+    container_name: weather-producer
+    env_file:
+      - .env
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_TOPIC: weather-raw
+      LATITUDE: ${WEATHER_LATITUDE:-47.3508}
+      LONGITUDE: ${WEATHER_LONGITUDE:-8.2435}
+      STATION_ID: ${WEATHER_STATION_ID:-villmergen}
+      POLL_INTERVAL_SECONDS: ${WEATHER_POLL_INTERVAL_SECONDS:-900}
+    networks:
+      - pipeline-net
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: on-failure
+
+  # ---------------------------------------------------------------------
+  # Producer: Solar Manager PV
+  # ---------------------------------------------------------------------
+  energy-producer:
+    build: ./producers/energy
+    container_name: energy-producer
+    env_file:
+      - .env
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_TOPIC: energy-raw
+      SOLAR_MANAGER_USER: ${SOLAR_MANAGER_USER:-}
+      SOLAR_MANAGER_PASSWORD: ${SOLAR_MANAGER_PASSWORD:-}
+      SOLAR_MANAGER_SM_ID: ${SOLAR_MANAGER_SM_ID:-0033000C3133510F35303638}
+      SOLAR_MANAGER_POLL_INTERVAL_SECONDS: ${SOLAR_MANAGER_POLL_INTERVAL_SECONDS:-60}
+    networks:
+      - pipeline-net
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: on-failure
+
+networks:
+  pipeline-net:
+    driver: bridge
+
+volumes:
+  redpanda-volume:
+  prom-volume:
+  timescale-volume:
+  grafana-volume:
