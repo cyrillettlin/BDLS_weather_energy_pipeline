@@ -7,7 +7,7 @@ from kafka import KafkaProducer
 
 # Config
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "redpanda:9092")
-SM_ID = "0033000C3133510F35303638"
+SM_ID = os.getenv("SOLAR_MANAGER_SM_ID", "")
 STATION_ID = "WEATHER_STATION_01"
 
 print(f"Connecting to Kafka Brokers at: {KAFKA_BROKERS}")
