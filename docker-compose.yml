@@ -158,6 +158,7 @@ services:
     volumes:
       - grafana-volume:/var/lib/grafana
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
     depends_on:
       timescaledb:
         condition: service_healthy
