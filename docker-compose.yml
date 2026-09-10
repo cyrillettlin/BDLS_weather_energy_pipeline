@@ -72,6 +72,24 @@ services:
     restart: on-failure
 
   # ---------------------------------------------------------------------
+  # CAdvisor for Docker Metrics
+  # ---------------------------------------------------------------------
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    ports:
+      - "8085:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      - pipeline-net
+    restart: on-failure
+
+  # ---------------------------------------------------------------------
   # TimescaleDB & pgAdmin
   # ---------------------------------------------------------------------
   timescaledb:
@@ -110,6 +128,20 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://pipeline:pipeline@timescaledb:5432/pipeline_db?sslmode=disable"
+    ports:
+      - "9187:9187"
+    networks:
+      - pipeline-net
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: on-failure
+
   # ---------------------------------------------------------------------
   # Grafana
   # ---------------------------------------------------------------------
@@ -140,6 +172,8 @@ services:
     image: spark:3.5.8
     container_name: spark-master
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    volumes:
+      - ./spark-conf/metrics.properties:/opt/spark/conf/metrics.properties:ro
     ports:
       - "8081:8080"   # Spark Master UI
       - "7077:7077"   # Spark Master RPC
@@ -154,6 +188,8 @@ services:
     environment:
       - SPARK_WORKER_CORES=2
       - SPARK_WORKER_MEMORY=2g
+    volumes:
+      - ./spark-conf/metrics.properties:/opt/spark/conf/metrics.properties:ro
     networks:
       - pipeline-net
     depends_on:
@@ -175,8 +211,11 @@ services:
       - WEATHER_POLL_INTERVAL_SECONDS=${WEATHER_POLL_INTERVAL_SECONDS:-900}
     volumes:
       - ./jobs:/opt/spark-apps
+      - ./spark-conf/metrics.properties:/opt/spark/conf/metrics.properties:ro
     networks:
       - pipeline-net
+    ports:
+      - "4040:4040"
     depends_on:
       - spark-worker
       - timescaledb
@@ -247,6 +286,7 @@ services:
       redpanda:
         condition: service_healthy
     restart: on-failure
+
 
 networks:
   pipeline-net:
