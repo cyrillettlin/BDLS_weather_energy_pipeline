@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, lit
+from pyspark.sql.functions import from_json, col, lit, when
 from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, LongType
 )
@@ -15,22 +15,14 @@ DB_USER = "pipeline"
 DB_PASSWORD = "pipeline"
 JDBC_DRIVER = "org.postgresql.Driver"
 JDBC_PROPS = {"user": DB_USER, "password": DB_PASSWORD, "driver": JDBC_DRIVER}
-
-# ---------------------------------------------------------------------
-# PV-Ertragsschaetzung: Konfiguration
-# ---------------------------------------------------------------------
 PV_PEAK_POWER_W = float(os.getenv("PV_PEAK_POWER_W", "5000"))
 PERFORMANCE_RATIO = float(os.getenv("PV_PERFORMANCE_RATIO", "0.80"))
 TOLERANCE_PCT = float(os.getenv("PV_TOLERANCE_PCT", "0.15"))
-
-PV_WEATHER_STATION_ID = os.getenv("PV_WEATHER_STATION_ID", "villmergen")
-
+PV_WEATHER_STATION_ID = os.environ["PV_WEATHER_STATION_ID"]
+WIND_WEATHER_STATION_ID = os.environ["WIND_WEATHER_STATION_ID"]
+WIND_RPM_MIN_FACTOR = float(os.environ["WIND_RPM_MIN_FACTOR"])
+WIND_RPM_MAX_FACTOR = float(os.environ["WIND_RPM_MAX_FACTOR"])
 WEATHER_POLL_INTERVAL_SECONDS = int(os.getenv("WEATHER_POLL_INTERVAL_SECONDS", "900"))
-
-# Wie alt darf die zuletzt bekannte Wettermessung maximal sein, damit sie
-# noch fuer eine Schaetzung verwendet wird? (z.B. falls der Wetter-Producer
-# laengere Zeit ausfaellt, sollen keine Schaetzungen mit veralteten Werten
-# entstehen). Grosszuegig auf das 2-fache des Poll-Intervalls gesetzt.
 MAX_WEATHER_AGE_SECONDS = int(os.getenv("PV_MAX_WEATHER_AGE_SECONDS", str(WEATHER_POLL_INTERVAL_SECONDS * 2)))
 
 # ---------------------------------------------------------------------
@@ -62,6 +54,12 @@ energy_schema = StructType([
         StructField("production", LongType(), True),
         StructField("consumption", LongType(), True)
     ]), True)
+])
+
+windpark_schema = StructType([
+    StructField("windpark_id", StringType(), True),
+    StructField("timestamp", DoubleType(), True),
+    StructField("rpm", DoubleType(), True)
 ])
 
 # ---------------------------------------------------------------------
@@ -103,25 +101,24 @@ def write_energy_batch(df, epoch_id):
             print(f"[energy_batch epoch={epoch_id}] JDBC write failed: {e}", flush=True)
 
 
-# ---------------------------------------------------------------------
-# GEAENDERT: Stream 3 als As-of-Lookup statt Stream-Stream-Join.
-#
-# Nach mehreren Versuchen mit Sparks nativem Stream-Stream-Join (Range-
-# Bedingung ohne Equality, OR-verknuepfte Bucket-Equality, konstanter
-# Dummy-Equality-Key) blieb pv_estimates leer, obwohl die Zeitfenster in
-# den persistierten Daten sich nachweislich ueberlappten. Die Ursache
-# liegt vermutlich im Zusammenspiel aus Watermark-State-Buffering und
-# zwei unabhaengigen Kafka-Consumer-Gruppen (energy_query/weather_query
-# vs. estimate_query lesen denselben Kafka-Topic separat und unabhaengig
-# voneinander ein), was fuer den fachlich eigentlich einfachen Bedarf
-# ("nimm die zuletzt bekannte Wettermessung") unnoetig fragil ist.
-#
-# Stattdessen: Bei jedem Energie-Batch wird direkt per JDBC die aktuell
-# juengste Wetterzeile aus der bereits von Stream 1 befuellten Tabelle
-# weather_data gelesen (klassisches As-of-/Punkt-Lookup). Das ist robust,
-# leicht nachvollziehbar und passt semantisch besser zum Anwendungsfall
-# als ein zeitfenstergebundener Stream-Stream-Join.
-# ---------------------------------------------------------------------
+def write_windpark_batch(df, epoch_id):
+    count = df.count()
+    if count > 0:
+        try:
+            df.write \
+                .format("jdbc") \
+                .option("url", DB_URL) \
+                .option("dbtable", "windpark_data") \
+                .option("user", DB_USER) \
+                .option("password", DB_PASSWORD) \
+                .option("driver", JDBC_DRIVER) \
+                .mode("append") \
+                .save()
+            print(f"[windpark_batch epoch={epoch_id}] {count} Zeilen geschrieben.", flush=True)
+        except Exception as e:
+            print(f"[windpark_batch epoch={epoch_id}] JDBC write failed: {e}", flush=True)
+
+
 def write_estimate_batch(df, epoch_id):
     count = df.count()
     print(f"[estimate_batch epoch={epoch_id}] Batch aufgerufen mit {count} Zeilen.", flush=True)
@@ -190,6 +187,81 @@ def write_estimate_batch(df, epoch_id):
         print(f"[estimate_batch epoch={epoch_id}] JDBC write failed: {e}", flush=True)
 
 
+def write_wind_estimate_batch(df, epoch_id):
+    count = df.count()
+    print(f"[wind_estimate_batch epoch={epoch_id}] Batch aufgerufen mit {count} Zeilen.", flush=True)
+    if count == 0:
+        return
+
+    try:
+        latest_weather_rows = spark.read.jdbc(
+            url=DB_URL, table="weather_data", properties=JDBC_PROPS
+        ).filter(col("station_id") == WIND_WEATHER_STATION_ID) \
+         .orderBy(col("time").desc()) \
+         .limit(1) \
+         .collect()
+    except Exception as e:
+        print(f"[wind_estimate_batch epoch={epoch_id}] JDBC read (weather_data) failed: {e}", flush=True)
+        return
+
+    if not latest_weather_rows:
+        print(f"[wind_estimate_batch epoch={epoch_id}] Noch keine Wetterdaten fuer Station '{WIND_WEATHER_STATION_ID}' vorhanden - ueberspringe.", flush=True)
+        return
+
+    latest_weather = latest_weather_rows[0]
+    weather_time = latest_weather["time"]
+    wind_speed = latest_weather["wind_speed"]
+    if wind_speed is None:
+        print(f"[wind_estimate_batch epoch={epoch_id}] Windgeschwindigkeit fehlt - ueberspringe.", flush=True)
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    weather_time_utc = weather_time if weather_time.tzinfo is not None else weather_time.replace(tzinfo=timezone.utc)
+    weather_age = now_utc - weather_time_utc
+
+    if weather_age > timedelta(seconds=MAX_WEATHER_AGE_SECONDS):
+        print(
+            f"[wind_estimate_batch epoch={epoch_id}] Letzte Wettermessung ist {weather_age} alt "
+            f"(> {MAX_WEATHER_AGE_SECONDS}s) - ueberspringe.",
+            flush=True
+        )
+        return
+
+    estimate_df = df.select(
+        col("time"),
+        col("windpark_id"),
+        col("rpm").alias("actual_rpm")
+    ).withColumn("station_id", lit(WIND_WEATHER_STATION_ID)) \
+     .withColumn("wind_speed", lit(wind_speed)) \
+        .withColumn("expected_rpm_min", lit(wind_speed * WIND_RPM_MIN_FACTOR)) \
+        .withColumn("expected_rpm_max", lit(wind_speed * WIND_RPM_MAX_FACTOR)) \
+     .withColumn(
+         "deviation_rpm",
+         when(col("actual_rpm") < col("expected_rpm_min"), col("actual_rpm") - col("expected_rpm_min"))
+         .when(col("actual_rpm") > col("expected_rpm_max"), col("actual_rpm") - col("expected_rpm_max"))
+         .otherwise(lit(0.0))
+     )
+
+    out_count = estimate_df.count()
+    try:
+        estimate_df.write \
+            .format("jdbc") \
+            .option("url", DB_URL) \
+            .option("dbtable", "windpark_estimates") \
+            .option("user", DB_USER) \
+            .option("password", DB_PASSWORD) \
+            .option("driver", JDBC_DRIVER) \
+            .mode("append") \
+            .save()
+        print(
+            f"[wind_estimate_batch epoch={epoch_id}] {out_count} Zeilen in windpark_estimates geschrieben "
+            f"(wind_speed={wind_speed} von Wetterzeit {weather_time}).",
+            flush=True
+        )
+    except Exception as e:
+        print(f"[wind_estimate_batch epoch={epoch_id}] JDBC write failed: {e}", flush=True)
+
+
 # ---------------------------------------------------------------------
 # Stream 1: Weather Data Pipeline
 # ---------------------------------------------------------------------
@@ -245,9 +317,7 @@ energy_query = parsed_energy_df.writeStream \
     .start()
 
 # ---------------------------------------------------------------------
-# Stream 3: PV-Ertragsschaetzung - As-of-Lookup auf jedem Energie-Batch
-# (nutzt dieselbe geparste Energie-Quelle wie Stream 2, aber eigener
-# Checkpoint und eigene foreachBatch-Logik, siehe write_estimate_batch)
+# Stream 3: PV-Ertragsschaetzung
 # ---------------------------------------------------------------------
 estimate_query = parsed_energy_df.writeStream \
     .foreachBatch(write_estimate_batch) \
@@ -256,6 +326,40 @@ estimate_query = parsed_energy_df.writeStream \
     .start()
 
 # ---------------------------------------------------------------------
-# Await Termination
+# Stream 4: Windpark RPM Data Pipeline
+# ---------------------------------------------------------------------
+raw_windpark_df = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", KAFKA_BROKERS) \
+    .option("subscribe", "windpark-raw") \
+    .option("startingOffsets", "earliest") \
+    .load()
+
+parsed_windpark_df = raw_windpark_df \
+    .selectExpr("CAST(value AS STRING) as json_payload") \
+    .select(from_json(col("json_payload"), windpark_schema).alias("data")) \
+    .select(
+        col("data.timestamp").cast("timestamp").alias("time"),
+        col("data.windpark_id").alias("windpark_id"),
+        col("data.rpm").alias("rpm")
+    )
+
+windpark_query = parsed_windpark_df.writeStream \
+    .foreachBatch(write_windpark_batch) \
+    .outputMode("append") \
+    .option("checkpointLocation", "/tmp/spark_checkpoints/windpark") \
+    .start()
+
+# ---------------------------------------------------------------------
+# Stream 5: Windpark RPM Erwartungsbereich
+# ---------------------------------------------------------------------
+wind_estimate_query = parsed_windpark_df.writeStream \
+    .foreachBatch(write_wind_estimate_batch) \
+    .outputMode("append") \
+    .option("checkpointLocation", "/tmp/spark_checkpoints/windpark_estimates") \
+    .start()
+
+# ---------------------------------------------------------------------
+# Teardown
 # ---------------------------------------------------------------------
 spark.streams.awaitAnyTermination()

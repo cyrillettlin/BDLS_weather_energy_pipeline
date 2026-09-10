@@ -171,7 +171,10 @@ services:
       - PV_PEAK_POWER_W=${PV_PEAK_POWER_W:-5000}
       - PV_PERFORMANCE_RATIO=${PV_PERFORMANCE_RATIO:-0.80}
       - PV_TOLERANCE_PCT=${PV_TOLERANCE_PCT:-0.15}
-      - PV_WEATHER_STATION_ID=${PV_WEATHER_STATION_ID:-villmergen}
+      - PV_WEATHER_STATION_ID=${PV_WEATHER_STATION_ID}
+      - WIND_WEATHER_STATION_ID=${WIND_WEATHER_STATION_ID}
+      - WIND_RPM_MIN_FACTOR=${WIND_RPM_MIN_FACTOR}
+      - WIND_RPM_MAX_FACTOR=${WIND_RPM_MAX_FACTOR}
       - WEATHER_POLL_INTERVAL_SECONDS=${WEATHER_POLL_INTERVAL_SECONDS:-900}
     volumes:
       - ./jobs:/opt/spark-apps
@@ -198,9 +201,9 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:9092
       KAFKA_TOPIC: weather-raw
-      LATITUDE: ${WEATHER_LATITUDE:-47.3508}
-      LONGITUDE: ${WEATHER_LONGITUDE:-8.2435}
-      STATION_ID: ${WEATHER_STATION_ID:-villmergen}
+      WEATHER_LOCATIONS: >-
+        [{"station_id":"${PV_WEATHER_STATION_ID}","latitude":47.3508,"longitude":8.2435},
+        {"station_id":"${WIND_WEATHER_STATION_ID}","latitude":53.8300,"longitude":9.2000}]
       POLL_INTERVAL_SECONDS: ${WEATHER_POLL_INTERVAL_SECONDS:-900}
     networks:
       - pipeline-net
@@ -240,6 +243,7 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:9092
       KAFKA_TOPIC: windpark-raw
+      WINDPARK_ID: ${WIND_WEATHER_STATION_ID}
       WINDPARK_PUBLISH_INTERVAL_SECONDS: ${WINDPARK_PUBLISH_INTERVAL_SECONDS:-60}
     networks:
       - pipeline-net
