@@ -13,7 +13,7 @@ KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "energy-raw")
 
 SM_USER = os.environ.get("SOLAR_MANAGER_USER", "")
 SM_PASSWORD = os.environ.get("SOLAR_MANAGER_PASSWORD", "")
-SM_ID = os.environ.get("SOLAR_MANAGER_SM_ID", "0033000C3133510F35303638")
+SM_ID = os.environ.get("SOLAR_MANAGER_SM_ID", "")
 POLL_INTERVAL_SECONDS = int(os.environ.get("SOLAR_MANAGER_POLL_INTERVAL_SECONDS", "60"))
 
 BASE_URL = "https://cloud.solar-manager.ch/v1"
