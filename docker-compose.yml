@@ -226,6 +226,23 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  # ---------------------------------------------------------------------
+  # Producer: DLR Windpark RPM
+  # ---------------------------------------------------------------------
+  windpark-producer:
+    build: ./producers/windpark
+    container_name: windpark-producer
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_TOPIC: windpark-raw
+      WINDPARK_PUBLISH_INTERVAL_SECONDS: ${WINDPARK_PUBLISH_INTERVAL_SECONDS:-60}
+    networks:
+      - pipeline-net
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: on-failure
+
 networks:
   pipeline-net:
     driver: bridge
