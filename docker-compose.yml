@@ -168,6 +168,11 @@ services:
       - HOME=/tmp
       - SPARK_USER=spark
       - SPARK_SUBMIT_OPTS=-Duser.home=/tmp -Divy.default.ivy.user.dir=/tmp/.ivy2
+      - PV_PEAK_POWER_W=${PV_PEAK_POWER_W:-5000}
+      - PV_PERFORMANCE_RATIO=${PV_PERFORMANCE_RATIO:-0.80}
+      - PV_TOLERANCE_PCT=${PV_TOLERANCE_PCT:-0.15}
+      - PV_WEATHER_STATION_ID=${PV_WEATHER_STATION_ID:-villmergen}
+      - WEATHER_POLL_INTERVAL_SECONDS=${WEATHER_POLL_INTERVAL_SECONDS:-900}
     volumes:
       - ./jobs:/opt/spark-apps
     networks:

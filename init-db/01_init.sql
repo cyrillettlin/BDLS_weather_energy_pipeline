@@ -17,3 +17,20 @@ CREATE TABLE IF NOT EXISTS weather_data (
     irradiance DOUBLE PRECISION
 );
 SELECT create_hypertable('weather_data', 'time', if_not_exists => TRUE);
+
+-- Speichert die aus der Einstrahlung abgeleitete PV-Ertragsschaetzung
+-- inkl. Toleranzband, gegenuebergestellt mit dem tatsaechlichen Ertrag.
+-- station_id verweist auf die Wetteranlage, deren irradiance-Wert
+-- fuer die Schaetzung verwendet wurde.
+CREATE TABLE IF NOT EXISTS pv_estimates (
+    time TIMESTAMPTZ NOT NULL,
+    sm_id VARCHAR(50),
+    station_id VARCHAR(50),
+    irradiance DOUBLE PRECISION,
+    expected_production DOUBLE PRECISION,
+    expected_production_min DOUBLE PRECISION,
+    expected_production_max DOUBLE PRECISION,
+    actual_production BIGINT,
+    deviation_w DOUBLE PRECISION
+);
+SELECT create_hypertable('pv_estimates', 'time', if_not_exists => TRUE);
