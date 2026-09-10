@@ -197,9 +197,35 @@ services:
       - spark-master
     restart: on-failure
 
-  spark-submit:
+  spark-submit-ingest:
     image: spark:3.5.8
-    container_name: spark-submit
+    container_name: spark-submit-ingest
+    user: root
+    environment:
+      - HOME=/tmp
+      - SPARK_USER=spark
+      - SPARK_SUBMIT_OPTS=-Duser.home=/tmp -Divy.default.ivy.user.dir=/tmp/.ivy2
+    volumes:
+      - ./jobs:/opt/spark-apps
+      - ./spark-conf/metrics.properties:/opt/spark/conf/metrics.properties:ro
+    networks:
+      - pipeline-net
+    ports:
+      - "4040:4040"
+    depends_on:
+      - spark-worker
+      - timescaledb
+    command: >
+      /opt/spark/bin/spark-submit
+      --master local[*]
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.postgresql:postgresql:42.7.2
+      --py-files /opt/spark-apps/config.py
+      /opt/spark-apps/ingest_job.py
+    restart: on-failure
+
+  spark-submit-estimates:
+    image: spark:3.5.8
+    container_name: spark-submit-estimates
     user: root
     environment:
       - HOME=/tmp
@@ -219,15 +245,17 @@ services:
     networks:
       - pipeline-net
     ports:
-      - "4040:4040"
+      - "4041:4040"
     depends_on:
       - spark-worker
       - timescaledb
+      - spark-submit-ingest
     command: >
       /opt/spark/bin/spark-submit
       --master local[*]
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.postgresql:postgresql:42.7.2
-      /opt/spark-apps/streaming_job.py
+      --py-files /opt/spark-apps/config.py
+      /opt/spark-apps/estimate_job.py
     restart: on-failure
 
   # ---------------------------------------------------------------------
