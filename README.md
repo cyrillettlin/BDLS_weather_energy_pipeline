@@ -1,2 +1,0 @@
-# BDLS_weather_energy_pipeline
-Hello

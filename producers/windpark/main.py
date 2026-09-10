@@ -15,7 +15,7 @@ log = logging.getLogger("windpark-producer")
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "redpanda:9092")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "windpark-raw")
-WINDPARK_ID = "dlr-windpark"
+WINDPARK_ID = os.environ["WINDPARK_ID"]
 PUBLISH_INTERVAL_SECONDS = float(
     os.environ.get("WINDPARK_PUBLISH_INTERVAL_SECONDS", "60")
 )
@@ -36,21 +36,16 @@ NUMBER_OF_BLADES = 3
 
 producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
 
-
 def delivery_report(error, message):
     if error is not None:
         log.error("Kafka delivery failed: %s", error)
-
 
 def open_stream():
     capture = cv2.VideoCapture(STREAM_URL, cv2.CAP_FFMPEG)
     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return capture
 
-
 class LatestFrame:
-    """Drains the stream continuously and exposes only its newest frame."""
-
     def __init__(self):
         self.capture = open_stream()
         if not self.capture.isOpened():
@@ -82,18 +77,15 @@ class LatestFrame:
         self.capture.release()
         self.thread.join(timeout=2)
 
-
 def detect_blade(frame):
     gate = frame[GATE_Y : GATE_Y + GATE_SIZE, GATE_X : GATE_X + GATE_SIZE]
     hsv = cv2.cvtColor(gate, cv2.COLOR_BGR2HSV)
     red = cv2.inRange(hsv, (0, MIN_SATURATION, MIN_VALUE), (12, 255, 255))
     red |= cv2.inRange(hsv, (170, MIN_SATURATION, MIN_VALUE), (179, 255, 255))
     red = cv2.morphologyEx(red, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-
     count, _, stats, _ = cv2.connectedComponentsWithStats(red, connectivity=8)
     largest_area = max(stats[1:, cv2.CC_STAT_AREA], default=0) if count > 1 else 0
     return largest_area >= MIN_RED_AREA, int(largest_area), red
-
 
 def calculate_rpm(passages):
     if len(passages) < 2:
@@ -101,7 +93,6 @@ def calculate_rpm(passages):
     duration = passages[-1] - passages[0]
     blade_passes = len(passages) - 1
     return blade_passes * 60 / (duration * NUMBER_OF_BLADES) if duration > 0 else None
-
 
 def publish_rpm(rpm):
     record = {
@@ -117,7 +108,6 @@ def publish_rpm(rpm):
     )
     producer.flush(10)
     log.info("Published RPM for %s: %s", WINDPARK_ID, rpm)
-
 
 def main():
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
@@ -171,7 +161,6 @@ def main():
         stream.close()
         producer.flush(10)
         log.info("Windpark producer stopped")
-
 
 if __name__ == "__main__":
     main()

@@ -10,12 +10,10 @@ log = logging.getLogger("solar-manager-producer")
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "redpanda:9092")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "energy-raw")
-
 SM_USER = os.environ.get("SOLAR_MANAGER_USER", "")
 SM_PASSWORD = os.environ.get("SOLAR_MANAGER_PASSWORD", "")
 SM_ID = os.environ.get("SOLAR_MANAGER_SM_ID", "")
 POLL_INTERVAL_SECONDS = int(os.environ.get("SOLAR_MANAGER_POLL_INTERVAL_SECONDS", "60"))
-
 BASE_URL = "https://cloud.solar-manager.ch/v1"
 
 producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
@@ -46,10 +44,6 @@ def fetch_solar_manager_data() -> dict:
     }
 
 def main():
-    if not SM_USER or not SM_PASSWORD:
-        log.warning("Keine Solar Manager Zugangsdaten angegeben. Beende Container...")
-        return
-
     log.info("Solar Manager Producer gestartet für Gateway: %s (Intervall: %ss)", SM_ID, POLL_INTERVAL_SECONDS)
     
     while True:
