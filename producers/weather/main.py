@@ -10,17 +10,15 @@ from kafka import KafkaProducer
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("open-meteo-producer")
 
-# ---------------------------------------------------------------------
-# Konfiguration (aus .env / docker-compose environment)
-# ---------------------------------------------------------------------
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "redpanda:9092")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "weather-raw")
-
-LATITUDE = os.environ.get("LATITUDE", "47.3508")
-LONGITUDE = os.environ.get("LONGITUDE", "8.2435")
-STATION_ID = os.environ.get("STATION_ID", "villmergen")
+WEATHER_LOCATIONS = json.loads(
+    os.environ.get(
+        "WEATHER_LOCATIONS",
+        '[]',
+    )
+)
 POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "900"))
-
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 # "current"-Parameter der Open-Meteo API:
@@ -29,7 +27,7 @@ CURRENT_PARAMS = [
     "temperature_2m",
     "relative_humidity_2m",
     "wind_speed_10m",
-    "shortwave_radiation",  # Globalstrahlung (GHI) in W/m^2 - Basis fuer die PV-Schaetzung
+    "shortwave_radiation",  # Globalstrahlung (GHI) in W/m^2 - Basis fuer die PV-Schätzung
 ]
 
 producer = KafkaProducer(
@@ -39,10 +37,10 @@ producer = KafkaProducer(
 )
 
 
-def fetch_current_weather() -> dict:
+def fetch_current_weather(location: dict) -> dict:
     params = {
-        "latitude": LATITUDE,
-        "longitude": LONGITUDE,
+        "latitude": location["latitude"],
+        "longitude": location["longitude"],
         "current": ",".join(CURRENT_PARAMS),
         "timezone": "UTC",
     }
@@ -52,7 +50,7 @@ def fetch_current_weather() -> dict:
 
     current = payload.get("current", {})
     if not current:
-        raise ValueError(f"Open-Meteo Antwort enthaelt keinen 'current'-Block: {payload}")
+        raise ValueError(f"In der Response von Open-Meteo ist 'current' leer: {payload}")
 
     # Open-Meteo liefert 'time' als ISO-String ohne Zeitzonen-Suffix (UTC,
     # da timezone=UTC gesetzt ist). Wir konvertieren auf Unix-Epoch-Sekunden,
@@ -65,7 +63,7 @@ def fetch_current_weather() -> dict:
         ts = time.time()
 
     return {
-        "station_id": STATION_ID,
+        "station_id": location["station_id"],
         "timestamp": ts,
         "temperature": current.get("temperature_2m"),
         "humidity": current.get("relative_humidity_2m"),
@@ -80,19 +78,33 @@ def delivery_report(err, msg):
 
 
 def main():
+    if len(WEATHER_LOCATIONS) == 0:
+        log.error("Keine Wetterstation konfiguriert, Producer wird beendet.")
+        return
+    
     log.info(
-        "Open-Meteo Producer gestartet fuer Station '%s' (lat=%s, lon=%s, Intervall=%ss)",
-        STATION_ID, LATITUDE, LONGITUDE, POLL_INTERVAL_SECONDS,
+        "Open-Meteo Producer gestartet fuer %s (Intervall=%ss)",
+        ", ".join(location["station_id"] for location in WEATHER_LOCATIONS),
+        POLL_INTERVAL_SECONDS,
     )
 
     while True:
-        try:
-            record = fetch_current_weather()
-            producer.send(KAFKA_TOPIC, key=STATION_ID, value=record)
-            producer.flush()
-            log.info("Wetterdaten publiziert: %s", record)
-        except Exception as exc:
-            log.error("Fehler beim Abrufen/Senden der Open-Meteo-Daten: %s", exc)
+        for location in WEATHER_LOCATIONS:
+            try:
+                record = fetch_current_weather(location)
+                producer.send(
+                    KAFKA_TOPIC,
+                    key=location["station_id"],
+                    value=record,
+                )
+                producer.flush()
+                log.info("Wetterdaten publiziert: %s", record)
+            except Exception as exc:
+                log.error(
+                    "Fehler beim Abrufen/Senden für Station '%s': %s",
+                    location.get("station_id", "unbekannt"),
+                    exc,
+                )
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
