@@ -25,7 +25,7 @@ STREAM_URL = (
 )
 
 # Square in which a passing red blade is detected.
-GATE_X, GATE_Y, GATE_SIZE = 1680, 180, 240
+GATE_X, GATE_Y, GATE_SIZE = 1000, 180, 240
 MIN_RED_AREA = 100
 MIN_SATURATION, MIN_VALUE = 100, 80
 
