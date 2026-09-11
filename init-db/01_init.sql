@@ -1,5 +1,10 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
+ALTER DATABASE pipeline_db
+SET timezone TO 'Europe/Zurich';
+
+SET timezone TO 'Europe/Zurich';
+
 CREATE TABLE IF NOT EXISTS pv_data (
     time TIMESTAMPTZ NOT NULL,
     sm_id VARCHAR(50),
