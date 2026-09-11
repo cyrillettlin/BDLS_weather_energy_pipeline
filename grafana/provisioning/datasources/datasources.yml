@@ -13,6 +13,7 @@ datasources:
     type: postgres
     access: proxy
     url: timescaledb:5432
+    uid: timescaledb
     database: pipeline_db
     user: pipeline
     isDefault: true
